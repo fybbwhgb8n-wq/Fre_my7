@@ -1,0 +1,106 @@
+# One-Shot Robust Capon Fusion Configuration - K=2 (Low/High)
+# ADMM-free one-shot solver with diagonal uncertainty (recommended baseline)
+
+# ============== Model Configuration ==============
+model:
+  backbone: unet
+  base_channels: 32
+  K: 2                          # Number of frequency streams
+  freq_mode: low_high           # Options: low_high, haar, learnable
+
+  # Fusion scales - start with decoder_last for stability
+  fusion_scales: ["decoder_last"]
+
+# ============== Fusion Configuration ==============
+fusion:
+  kernel_size: 3                # Neighborhood size for covariance
+  center_snapshots: true        # Subtract local mean (recommended)
+
+  # Guidance vector
+  a0_mode: stage                # Options: fixed | stage | pixel
+  a0_floor: 0.001               # Minimum a0 value
+
+  # Uncertainty (diagonal recommended for stability)
+  uncert_mode: diag             # Options: diag | full
+  sigma_max: 1.0                # Maximum sigma (CRITICAL for stability)
+  d: 4                          # Only for uncert_mode: full
+
+# ============== Solver Configuration ==============
+solver:
+  gamma: 1.0                    # Robustness loading strength
+  learn_gamma: true             # Whether to learn gamma
+  gamma_min: 0.0                # Minimum gamma value
+
+  # Covariance stabilization (CRITICAL)
+  cov_shrink: 0.1               # Shrinkage to identity (0.05-0.2)
+  cov_delta: 0.001              # Diagonal loading floor (1e-3 to 1e-2)
+  jitter: 0.000001              # Cholesky jitter
+
+  # Numerical stability
+  use_double: true              # Use float64 for solve (HIGHLY RECOMMENDED)
+  margin_eps: 0.0001            # Minimum margin before fallback
+  fallback_mode: a0             # Options: a0 | uniform
+  w_clip: 20.0                  # Weight clipping (null to disable)
+  detach_weights: false         # Detach weights from gradient graph
+
+# ============== Loss Configuration ==============
+loss:
+  # Segmentation loss
+  lambda_dice: 1.0              # Weight for Dice loss
+
+  # Augmented Lagrangian sparsity constraint
+  use_al: true                  # Enable AL sparsity
+  al_warmup_epochs: 20          # Epochs before enabling AL
+  al_rho: 10.0                  # AL penalty weight rho
+  al_alpha: 2.5                 # Size-adaptive alpha (tau = alpha*g + beta/HW)
+  al_beta_pixels: 16            # Size-adaptive beta
+
+  # Isolation loss (Fa reduction)
+  use_iso: true                 # Enable isolation loss
+  lambda_iso: 0.001             # Weight for isolation loss
+  iso_gamma: 2.0                # Isolation exponent
+  iso_kernel: 3                 # Isolation pooling kernel
+
+# ============== Training Configuration ==============
+train:
+  lr: 0.0002                    # Learning rate (AdamW)
+  weight_decay: 0.01            # Weight decay
+  epochs: 400                   # Total epochs
+  batch_size: 8                 # Batch size
+
+  # Gradient clipping (IMPORTANT for stability)
+  grad_clip: 1.0                # Max gradient norm
+
+  # Mixed precision
+  amp: true                     # Use AMP (solver still uses float64)
+
+  # Scheduler
+  scheduler: cosine             # Options: cosine, step
+  warmup_epochs: 10             # Warmup epochs
+  min_lr: 0.00001               # Minimum learning rate
+
+  # Validation
+  val_interval: 5               # Validate every N epochs
+  threshold: 0.5                # Threshold for metrics
+
+# ============== Metrics Configuration ==============
+metrics:
+  min_area: 2                   # Minimum component area for Pd/Fa
+
+# ============== Dataset Configuration ==============
+dataset:
+  name: NUDT-SIRST              # Options: NUDT-SIRST, NUAA-SIRST, IRSTD-1k
+  root: ./dataset
+  base_size: 256
+  crop_size: 256
+
+# ============== Hardware Configuration ==============
+hardware:
+  ngpu: 0
+  multi_gpus: false
+  num_workers: 8
+  pin_memory: true
+
+# ============== Reproducibility ==============
+seed: 42
+
