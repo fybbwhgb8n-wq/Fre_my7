@@ -1,0 +1,63 @@
+dataset:
+  base_size: 256
+  crop_size: 256
+  name: NUAA-SIRST
+  root: ./dataset
+fusion:
+  a0_floor: 0.001
+  a0_mode: stage
+  center_snapshots: true
+  d: 4
+  kernel_size: 3
+  sigma_max: 1.0
+  uncert_mode: diag
+hardware:
+  multi_gpus: false
+  ngpu: 0
+  num_workers: 8
+  pin_memory: true
+loss:
+  al_alpha: 2.5
+  al_beta_pixels: 16
+  al_rho: 10.0
+  al_warmup_epochs: 20
+  iso_gamma: 2.0
+  iso_kernel: 3
+  lambda_dice: 1.0
+  lambda_iso: 0.001
+  use_al: true
+  use_iso: true
+metrics:
+  min_area: 2
+model:
+  K: 2
+  backbone: unet
+  base_channels: 32
+  freq_mode: low_high
+  fusion_scales:
+  - decoder_last
+seed: 42
+solver:
+  cov_delta: 0.001
+  cov_shrink: 0.1
+  detach_weights: false
+  fallback_mode: a0
+  gamma: 1.0
+  gamma_min: 0.0
+  jitter: 1.0e-06
+  learn_gamma: true
+  margin_eps: 0.0001
+  use_double: true
+  w_clip: 20.0
+train:
+  amp: true
+  batch_size: 8
+  epochs: 400
+  grad_clip: 1.0
+  lr: 0.0002
+  min_lr: 1.0e-05
+  scheduler: cosine
+  threshold: 0.5
+  val_interval: 5
+  warmup_epochs: 10
+  weight_decay: 0.01

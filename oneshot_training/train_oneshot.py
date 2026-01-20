@@ -70,9 +70,10 @@ MODE = 'train'                            # Mode: 'train' or 'test'
 RESUME_PATH = None                        # Resume checkpoint path (None for fresh start)
 WEIGHT_PATH = None                        # Weight path for test mode
 
-# Debug configuration
-USE_ROBUST_FUSION = False                 # Use Robust Fusion (False=original model, better performance)
-DEBUG_MODE = False                        # Print debug information
+# Robust Fusion configuration
+# TRUE SCHEME 3 IMPLEMENTATION: SOCP solver with covariance estimation
+USE_ROBUST_FUSION = True                  # Enable TRUE Robust Capon SOCP Fusion
+DEBUG_MODE = False                        # Print debug information (set True for troubleshooting)
 
 # ============================================================================
 

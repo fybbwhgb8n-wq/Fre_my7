@@ -8,15 +8,25 @@ vector mismatch.
 The Robust Capon Fusion replaces or augments the standard frequency fusion
 at decoder stages, providing:
     - Principled robustness to target signature variations
-    - Convex per-pixel optimization with theoretical guarantees
-    - Differentiable unrolled ADMM solver
+    - Convex per-pixel SOCP optimization with theoretical guarantees
+    - One-shot closed-form solver (ADMM-free)
 
-Key innovation:
-    Robust SOCP formulation guards against frequency signature mismatch:
-        min_w  w^T R w
-        s.t.   ||A^T w||_2 <= a0^T w - 1
+Key innovation (TRUE SCHEME 3 IMPLEMENTATION):
+    For each pixel p, solve the robust SOCP:
+        min_w   w^T R(p) w                        (minimize output power)
+        s.t.    ||A(p)^T w||_2 <= a0(p)^T w - 1   (robust distortionless)
+    
+    where:
+        R(p): Sample covariance from local neighborhood
+        a0(p): Nominal guidance/steering vector
+        A(p) = diag(sigma(p)): Uncertainty matrix
+    
+    One-shot closed-form solution:
+        u = (R + gamma * A A^T)^{-1} a0
+        margin = a0^T u - ||A^T u||_2
+        w = u / margin
 
-Author: Implementation for IRSTD with robust frequency fusion
+Author: Implementation for IRSTD with TRUE robust SOCP frequency fusion
 """
 
 import torch
@@ -29,9 +39,9 @@ import numbers
 sys.path.append('../')
 from utils.pooling import PWD2d
 from model.fusion import Freq_Fusion, LowPassConvGenerator, HighPassConvGenerator
-from model.robust_capon_fusion_stable import (
-    RobustCaponFusionStable,
-    RobustCaponFusionBlockStable,
+from model.robust_capon_fusion import (
+    RobustCaponFrequencyFusion,
+    RobustCaponFusionBlock,
 )
 from model.freq_decompose import FrequencyDecomposer
 from einops import rearrange
@@ -108,13 +118,16 @@ class RobustFreqFusion(nn.Module):
     """
     Robust Frequency Fusion module for decoder stages.
     
-    Uses ONE-SHOT solver (no ADMM) for maximum stability.
+    TRUE SCHEME 3 IMPLEMENTATION: Uses one-shot closed-form SOCP solver.
     
-    Recommended settings (from GPT):
-        - gamma: 1.0 (robustness loading)
-        - cov_shrink: 0.1 (covariance shrinkage)
-        - sigma_max: 0.3 (prevents margin collapse)
-        - guidance_mode='stage' for stability
+    For each pixel p, solves:
+        min_w   w^T R(p) w                        (minimize output power)
+        s.t.    ||A(p)^T w||_2 <= a0(p)^T w - 1   (robust distortionless)
+    
+    One-shot solution:
+        u = (R + gamma * A A^T)^{-1} a0
+        margin = a0^T u - ||A^T u||_2
+        w = u / margin
     
     Args:
         c_high: High-level (deeper) feature channels
@@ -125,7 +138,9 @@ class RobustFreqFusion(nn.Module):
         gamma: Robustness loading strength (default: 1.0)
         cov_shrink: Covariance shrinkage (default: 0.1)
         sigma_max: Max uncertainty (default: 0.3)
-        guidance_mode: Guidance vector mode
+        a0_mode: Guidance vector mode ('fixed', 'stage', 'pixel')
+        sigma_mode: Uncertainty mode ('fixed', 'stage', 'pixel')
+        patch_size: Local neighborhood size for covariance estimation
     """
     
     def __init__(
@@ -135,13 +150,20 @@ class RobustFreqFusion(nn.Module):
         c_out: int,
         K: int = 2,
         decompose_method: str = 'low_high',
-        # One-shot solver parameters (NEW)
+        # TRUE SOCP solver parameters
         gamma: float = 1.0,
         cov_shrink: float = 0.1,
+        cov_delta: float = 1e-3,
         sigma_max: float = 0.3,
-        guidance_mode: str = 'stage',
-        kernel_size: int = 3,
+        a0_mode: str = 'stage',
+        sigma_mode: str = 'stage',
+        patch_size: int = 3,
+        use_double: bool = True,
+        use_slack: bool = True,
+        slack_threshold: float = 0.1,
         # Legacy parameters (ignored, kept for API compatibility)
+        guidance_mode: str = 'stage',  # Alias for a0_mode
+        kernel_size: int = 3,
         n_iters: int = 5,
         rho: float = 10.0,
         uncertainty_mode: str = 'diagonal',
@@ -154,6 +176,10 @@ class RobustFreqFusion(nn.Module):
         self.c_low = c_low
         self.c_out = c_out
         self.K = K
+        
+        # Use guidance_mode as alias for a0_mode if a0_mode not explicitly set
+        if a0_mode == 'stage' and guidance_mode != 'stage':
+            a0_mode = guidance_mode
         
         # Channel projection for high-level features
         self.high_proj = nn.Sequential(
@@ -180,13 +206,20 @@ class RobustFreqFusion(nn.Module):
         )
         self.K = self.decomposer.K  # May be updated by decomposer
         
-        # Robust Capon frequency fusion (STABLE VERSION)
-        self.robust_fusion = RobustCaponFusionStable(
+        # TRUE ROBUST CAPON FREQUENCY FUSION (SOCP SOLVER)
+        self.robust_fusion = RobustCaponFrequencyFusion(
             K=self.K,
             in_channels=c_low,
-            kernel_size=kernel_size,
-            use_local_context=True,
-            temperature=1.0,
+            patch_size=patch_size,
+            a0_mode=a0_mode,
+            sigma_mode=sigma_mode,
+            sigma_max=sigma_max,
+            gamma=gamma,
+            cov_shrink=cov_shrink,
+            cov_delta=cov_delta,
+            use_double=use_double,
+            use_slack=use_slack,
+            slack_threshold=slack_threshold,
         )
         
         # Output convolution
@@ -201,16 +234,16 @@ class RobustFreqFusion(nn.Module):
     
     def forward(self, x_low, y_high, return_weights=False):
         """
-        Fuse high-level and low-level features using robust Capon fusion.
+        Fuse high-level and low-level features using TRUE robust Capon SOCP fusion.
         
         Args:
             x_low: [B, c_low, H, W] low-level (shallow) features
             y_high: [B, c_high, H/2, W/2] high-level (deep) features
-            return_weights: Whether to return fusion weights
+            return_weights: Whether to return fusion weights and debug info
             
         Returns:
             fused: [B, c_out, H, W] fused features
-            (optional) W_attn: [B, K, H, W] fusion weights
+            (optional) debug_dict: Solver debug information
         """
         # Upsample high-level features
         y_high_up = F.interpolate(y_high, scale_factor=2, mode='bilinear', align_corners=True)
@@ -228,10 +261,9 @@ class RobustFreqFusion(nn.Module):
         # Decompose into frequency streams
         freq_streams = self.decomposer(combined)  # [B, K, C, H, W]
         
-        # Apply robust Capon fusion (STABLE VERSION)
+        # Apply TRUE robust Capon SOCP fusion
         if return_weights:
             fused, debug_dict = self.robust_fusion(freq_streams, return_debug=True)
-            W_attn = debug_dict  # Return debug info as weights
         else:
             fused = self.robust_fusion(freq_streams)
         
@@ -243,7 +275,7 @@ class RobustFreqFusion(nn.Module):
         fused = torch.nan_to_num(fused, nan=0.0, posinf=0.0, neginf=0.0)
         
         if return_weights:
-            return fused, W_attn
+            return fused, debug_dict
         return fused
     
     def get_regularization_loss(self):
@@ -253,20 +285,23 @@ class RobustFreqFusion(nn.Module):
 
 class GSFANet_RCF(nn.Module):
     """
-    GSFANet with Robust Capon Frequency Fusion (One-Shot Version).
+    GSFANet with TRUE Robust Capon Frequency Fusion (Scheme 3 SOCP).
     
-    Uses ONE-SHOT solver (no ADMM) for maximum numerical stability.
+    Implements the full robust MVDR/SOCP formulation:
+        For each pixel p, solves:
+            min_w   w^T R(p) w                        (minimize output power)
+            s.t.    ||A(p)^T w||_2 <= a0(p)^T w - 1   (robust distortionless)
     
     Key features:
-        - Closed-form robust weight computation
-        - No iterative ADMM dynamics
-        - Smooth gradients, stable training
+        - Explicit covariance R(p) estimation from local patches
+        - Learnable guidance vector a0(p) and uncertainty sigma(p)
+        - One-shot closed-form SOCP solution (ADMM-free)
+        - Smooth gradients, stable training with slack mechanism
     
-    Recommended settings (from GPT):
-        - gamma: 1.0 (robustness loading)
-        - cov_shrink: 0.1 (covariance shrinkage)
-        - sigma_max: 0.3 (prevents margin collapse)
-        - guidance_mode='stage' for stability
+    Mathematical formulation:
+        u = (R + gamma * diag(sigma^2))^{-1} a0
+        margin = a0^T u - ||sigma * u||_2
+        w = u / margin
     
     Args:
         size: Input image size
@@ -275,8 +310,10 @@ class GSFANet_RCF(nn.Module):
         decompose_method: Frequency decomposition method
         gamma: Robustness loading strength (default: 1.0)
         cov_shrink: Covariance shrinkage (default: 0.1)
-        sigma_max: Max uncertainty (default: 0.3)
-        guidance_mode: Guidance vector mode
+        sigma_max: Max uncertainty for robustness envelope (default: 0.3)
+        a0_mode: Guidance vector mode ('fixed', 'stage', 'pixel')
+        sigma_mode: Uncertainty mode ('fixed', 'stage', 'pixel')
+        patch_size: Local neighborhood size for covariance estimation
         use_rcf_stages: Which decoder stages use RCF
     """
     
@@ -287,13 +324,20 @@ class GSFANet_RCF(nn.Module):
         block=ResNet,
         K: int = 2,
         decompose_method: str = 'low_high',
-        # One-shot solver parameters (NEW)
+        # TRUE SOCP solver parameters
         gamma: float = 1.0,
         cov_shrink: float = 0.1,
+        cov_delta: float = 1e-3,
         sigma_max: float = 0.3,
-        guidance_mode: str = 'stage',
+        a0_mode: str = 'stage',
+        sigma_mode: str = 'stage',
+        patch_size: int = 3,
+        use_double: bool = True,
+        use_slack: bool = True,
+        slack_threshold: float = 0.1,
         use_rcf_stages: list = None,
         # Legacy parameters (ignored, kept for API compatibility)
+        guidance_mode: str = 'stage',  # Alias for a0_mode
         n_iters: int = 5,
         rho: float = 10.0,
         uncertainty_mode: str = 'diagonal',
@@ -336,14 +380,24 @@ class GSFANet_RCF(nn.Module):
             size=size
         )
         
-        # Decoder stages with Robust Capon Fusion (ONE-SHOT)
+        # Decoder stages with TRUE Robust Capon Fusion (SOCP SOLVER)
+        # Use guidance_mode as alias for a0_mode if needed
+        if a0_mode == 'stage' and guidance_mode != 'stage':
+            a0_mode = guidance_mode
+        
         rcf_kwargs = {
             'K': K,
             'decompose_method': decompose_method,
             'gamma': gamma,
             'cov_shrink': cov_shrink,
+            'cov_delta': cov_delta,
             'sigma_max': sigma_max,
-            'guidance_mode': guidance_mode,
+            'a0_mode': a0_mode,
+            'sigma_mode': sigma_mode,
+            'patch_size': patch_size,
+            'use_double': use_double,
+            'use_slack': use_slack,
+            'slack_threshold': slack_threshold,
         }
         
         if 2 in self.use_rcf_stages:
